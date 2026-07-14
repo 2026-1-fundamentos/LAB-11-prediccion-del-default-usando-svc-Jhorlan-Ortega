@@ -1,177 +1,141 @@
 # flake8: noqa: E501
+"""Autograding script."""
+
 import gzip
 import json
 import os
 import pickle
-import zipfile
 
-import numpy as np
-import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.decomposition import PCA
-from sklearn.feature_selection import SelectKBest, f_classif
-from sklearn.metrics import (
-    balanced_accuracy_score,
-    confusion_matrix,
-    f1_score,
-    precision_score,
-    recall_score,
-)
-from sklearn.model_selection import GridSearchCV
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.svm import SVC
+import pandas as pd  # type: ignore
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Paso 1: Cargar y limpiar datos
-# ──────────────────────────────────────────────────────────────────────────────
-
-def load_and_clean(path: str) -> pd.DataFrame:
-    """Carga un CSV desde un .zip, aplica limpieza según el enunciado."""
-    with zipfile.ZipFile(path) as z:
-        csv_name = z.namelist()[0]
-        with z.open(csv_name) as f:
-            df = pd.read_csv(f)
-
-    # Renombrar columna objetivo
-    df = df.rename(columns={"default payment next month": "default"})
-
-    # Remover columna ID
-    df = df.drop(columns=["ID"])
-
-    # Eliminar registros con información no disponible (valores 0 en categoricas)
-    df = df[df["EDUCATION"] != 0]
-    df = df[df["MARRIAGE"] != 0]
-
-    # EDUCATION > 4 → 4 (others)
-    df["EDUCATION"] = df["EDUCATION"].apply(lambda x: 4 if x > 4 else x)
-
-    return df
-
-
-train_df = load_and_clean("files/input/train_data.csv.zip")
-test_df  = load_and_clean("files/input/test_data.csv.zip")
-
-print(f"Train shape: {train_df.shape} | Test shape: {test_df.shape}")
-print(f"Distribución target (train):\n{train_df['default'].value_counts()}")
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Paso 2: Separar features y target
-# ──────────────────────────────────────────────────────────────────────────────
-
-x_train = train_df.drop(columns=["default"])
-y_train = train_df["default"]
-
-x_test  = test_df.drop(columns=["default"])
-y_test  = test_df["default"]
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Paso 3: Construir el pipeline
-# Orden: OneHotEncoder → PCA → StandardScaler → SelectKBest → SVC
-# ──────────────────────────────────────────────────────────────────────────────
-
-categorical_features = ["SEX", "EDUCATION", "MARRIAGE"]
-numerical_features   = [c for c in x_train.columns if c not in categorical_features]
-
-# Paso 3.1 — OneHotEncoder solo en las columnas categóricas,
-#             passthrough en las numéricas
-preprocessor = ColumnTransformer(
-    transformers=[
-        ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_features),
-        ("num", "passthrough", numerical_features),
-    ]
-)
-
-pipeline = Pipeline(
-    steps=[
-        ("preprocessor", preprocessor),          # 1 — OneHotEncoder
-        ("pca",          PCA()),                  # 2 — PCA (todas las componentes)
-        ("scaler",       StandardScaler()),       # 3 — Estandarización
-        ("selector",     SelectKBest(f_classif)), # 4 — Selección de K mejores
-        ("svc",          SVC(random_state=42)),   # 5 — SVM
-    ]
-)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Paso 4: Optimización de hiperparámetros con GridSearchCV (10-fold CV)
-# ──────────────────────────────────────────────────────────────────────────────
-
-param_grid = {
-    "selector__k": [10, 15, 20],
-    "svc__C":      [1, 10],
-    "svc__kernel": ["rbf"],
-    "svc__gamma":  ["scale"],
-}
-
-model = GridSearchCV(
-    estimator=pipeline,
-    param_grid=param_grid,
-    cv=10,
-    scoring="balanced_accuracy",
-    n_jobs=-1,
-    refit=True,
-)
-
-print("\nEntrenando modelo con GridSearchCV...")
-model.fit(x_train, y_train)
-
-print(f"Mejores parámetros: {model.best_params_}")
-print(f"Mejor score CV: {model.best_score_:.4f}")
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Paso 5: Guardar modelo comprimido con gzip
-# ──────────────────────────────────────────────────────────────────────────────
-
-os.makedirs("files/models", exist_ok=True)
-with gzip.open("files/models/model.pkl.gz", "wb") as f:
-    pickle.dump(model, f)
-
-print("Modelo guardado en files/models/model.pkl.gz")
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Pasos 6 y 7: Métricas y matrices de confusión
-# ──────────────────────────────────────────────────────────────────────────────
-
-def compute_metrics(model, x, y, dataset_name: str):
-    """Calcula métricas y matriz de confusión para un conjunto de datos."""
-    y_pred = model.predict(x)
-
-    metrics = {
-        "type":              "metrics",
-        "dataset":           dataset_name,
-        "precision":         float(precision_score(y, y_pred, zero_division=0)),
-        "balanced_accuracy": float(balanced_accuracy_score(y, y_pred)),
-        "recall":            float(recall_score(y, y_pred, zero_division=0)),
-        "f1_score":          float(f1_score(y, y_pred, zero_division=0)),
-    }
-
-    cm = confusion_matrix(y, y_pred)
-    cm_dict = {
-        "type":    "cm_matrix",
-        "dataset": dataset_name,
-        "true_0":  {"predicted_0": int(cm[0, 0]), "predicted_1": int(cm[0, 1])},
-        "true_1":  {"predicted_0": int(cm[1, 0]), "predicted_1": int(cm[1, 1])},
-    }
-
-    return metrics, cm_dict
+# ------------------------------------------------------------------------------
+MODEL_FILENAME = "files/models/model.pkl.gz"
+MODEL_COMPONENTS = [
+    "OneHotEncoder",
+    "PCA",
+    "StandardScaler",
+    "SelectKBest",
+    "SVC",
+]
+SCORES = [
+    0.661,
+    0.666,
+]
+METRICS = [
+    {
+        "type": "metrics",
+        "dataset": "train",
+        "precision": 0.691,
+        "balanced_accuracy": 0.661,
+        "recall": 0.370,
+        "f1_score": 0.482,
+    },
+    {
+        "type": "metrics",
+        "dataset": "test",
+        "precision": 0.673,
+        "balanced_accuracy": 0.661,
+        "recall": 0.370,
+        "f1_score": 0.482,
+    },
+    {
+        "type": "cm_matrix",
+        "dataset": "train",
+        "true_0": {"predicted_0": 15440, "predicted_1": None},
+        "true_1": {"predicted_0": None, "predicted_1": 1735},
+    },
+    {
+        "type": "cm_matrix",
+        "dataset": "test",
+        "true_0": {"predicted_0": 6710, "predicted_1": None},
+        "true_1": {"predicted_0": None, "predicted_1": 730},
+    },
+]
 
 
-train_metrics, train_cm = compute_metrics(model, x_train, y_train, "train")
-test_metrics,  test_cm  = compute_metrics(model, x_test,  y_test,  "test")
+# ------------------------------------------------------------------------------
+#
+# Internal tests
+#
+def _load_model():
+    """Generic test to load a model"""
+    assert os.path.exists(MODEL_FILENAME)
+    with gzip.open(MODEL_FILENAME, "rb") as file:
+        model = pickle.load(file)
+    assert model is not None
+    return model
 
-# Mostrar resultados en consola
-for m in [train_metrics, test_metrics]:
-    print(f"\n[{m['dataset'].upper()}]")
-    print(f"  Precision:         {m['precision']:.4f}")
-    print(f"  Balanced accuracy: {m['balanced_accuracy']:.4f}")
-    print(f"  Recall:            {m['recall']:.4f}")
-    print(f"  F1-score:          {m['f1_score']:.4f}")
 
-# Guardar en metrics.json (una línea JSON por registro)
-os.makedirs("files/output", exist_ok=True)
-with open("files/output/metrics.json", "w", encoding="utf-8") as f:
-    for record in [train_metrics, test_metrics, train_cm, test_cm]:
-        f.write(json.dumps(record) + "\n")
+def _test_components(model):
+    """Test components"""
+    assert "GridSearchCV" in str(type(model))
+    current_components = [str(model.estimator[i]) for i in range(len(model.estimator))]
+    for component in MODEL_COMPONENTS:
+        assert any(component in x for x in current_components)
 
-print("\nMétricas guardadas en files/output/metrics.json")
-print("¡Listo!")
+
+def _load_grading_data():
+    """Load grading data"""
+    with open("files/grading/x_train.pkl", "rb") as file:
+        x_train = pickle.load(file)
+
+    with open("files/grading/y_train.pkl", "rb") as file:
+        y_train = pickle.load(file)
+
+    with open("files/grading/x_test.pkl", "rb") as file:
+        x_test = pickle.load(file)
+
+    with open("files/grading/y_test.pkl", "rb") as file:
+        y_test = pickle.load(file)
+
+    return x_train, y_train, x_test, y_test
+
+
+def _test_scores(model, x_train, y_train, x_test, y_test):
+    """Test scores"""
+    assert model.score(x_train, y_train) > SCORES[0]
+    assert model.score(x_test, y_test) > SCORES[1]
+
+
+def _load_metrics():
+    assert os.path.exists("files/output/metrics.json")
+    metrics = []
+    with open("files/output/metrics.json", "r", encoding="utf-8") as file:
+        for line in file:
+            metrics.append(json.loads(line))
+    return metrics
+
+
+def _test_metrics(metrics):
+
+    for index in [0, 1]:
+        assert metrics[index]["type"] == METRICS[index]["type"]
+        assert metrics[index]["dataset"] == METRICS[index]["dataset"]
+        assert metrics[index]["precision"] > METRICS[index]["precision"]
+        assert metrics[index]["balanced_accuracy"] > METRICS[index]["balanced_accuracy"]
+        assert metrics[index]["recall"] > METRICS[index]["recall"]
+        assert metrics[index]["f1_score"] > METRICS[index]["f1_score"]
+
+    for index in [2, 3]:
+        assert metrics[index]["type"] == METRICS[index]["type"]
+        assert metrics[index]["dataset"] == METRICS[index]["dataset"]
+        assert (
+            metrics[index]["true_0"]["predicted_0"]
+            > METRICS[index]["true_0"]["predicted_0"]
+        )
+        assert (
+            metrics[index]["true_1"]["predicted_1"]
+            > METRICS[index]["true_1"]["predicted_1"]
+        )
+
+
+def test_homework():
+    """Tests"""
+
+    model = _load_model()
+    x_train, y_train, x_test, y_test = _load_grading_data()
+    metrics = _load_metrics()
+
+    _test_components(model)
+    _test_scores(model, x_train, y_train, x_test, y_test)
+    _test_metrics(metrics)
